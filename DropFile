@@ -1,0 +1,85 @@
+import os
+import yaml
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.schema import Document
+from typing import List
+
+CONFIG_PATH = "config.yaml"
+DEFAULT_MODEL_NAME = "text-embedding-ada-002"
+DEFAULT_VECTOR_DB_PATH = "vector_db"
+
+class ConfigLoader:
+    @staticmethod
+    def load_config(config_path: str = CONFIG_PATH):
+        if os.path.exists(config_path):
+            with open(config_path, "r") as file:
+                return yaml.safe_load(file)
+        return {"model_name": DEFAULT_MODEL_NAME, "vector_db_path": DEFAULT_VECTOR_DB_PATH}
+
+class EmbeddingServiceGenerator:
+    def __init__(self, config_path: str = CONFIG_PATH):
+        config = ConfigLoader.load_config(config_path)
+        self.model_name = config.get("model_name", DEFAULT_MODEL_NAME)
+        self.vector_db_path = config.get("vector_db_path", DEFAULT_VECTOR_DB_PATH)
+        
+        self.embedding_model = OpenAIEmbeddings(model_name=self.model_name)
+        self.vector_store = self._load_vector_store(self.vector_db_path)
+        self.app = self._create_app()
+
+    def _load_vector_store(self, path: str):
+        if os.path.exists(path):
+            return FAISS.load_local(path, self.embedding_model)
+        return FAISS.from_documents([], self.embedding_model)
+    
+    def _create_app(self):
+        app = FastAPI()
+
+        class TextInput(BaseModel):
+            text: str
+
+        class QueryInput(BaseModel):
+            query: str
+            top_k: int = 5
+
+        @app.post("/embed/")
+        def generate_embedding(input_text: TextInput):
+            try:
+                embedding = self.embedding_model.embed_query(input_text.text)
+                return {"embedding": embedding}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/store/")
+        def store_embedding(input_text: TextInput):
+            try:
+                doc = Document(page_content=input_text.text)
+                self.vector_store.add_documents([doc])
+                return {"message": "Text stored successfully"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.post("/search/")
+        def search_embeddings(query_input: QueryInput):
+            try:
+                docs = self.vector_store.similarity_search(query_input.query, k=query_input.top_k)
+                return {"results": [doc.page_content for doc in docs]}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @app.get("/")
+        def root():
+            return {"message": "Embedding Service is running", "model": self.model_name, "vector_db": self.vector_db_path}
+        
+        return app
+
+    def run(self):
+        import uvicorn
+        uvicorn.run(self.app, host="0.0.0.0", port=8000)
+
+# Example Usage
+if __name__ == "__main__":
+    service = EmbeddingServiceGenerator()
+    service.run()
